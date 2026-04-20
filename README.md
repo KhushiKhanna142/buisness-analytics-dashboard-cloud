@@ -27,11 +27,14 @@ A cloud-based data analytics dashboard built as part of a Cloud Computing course
 ---
 
 ## 🗂️ Project Structure
-analytics-project/
-├── app.py          # Dash web dashboard — UI and callbacks
-├── analyze.py      # Data pipeline — S3 read, pandas analysis, S3 write
-├── .gitignore      # Excludes venv, logs, and .pem files
-└── README.md       # Project documentation
+analytics-dashboard-cloud/
+├── app.py
+├── analyze.py
+├── requirements.txt
+├── sample_data/
+│   └── sample.csv
+├── .gitignore
+└── README.md
 ---
 
 ## 🛠️ Tech Stack
