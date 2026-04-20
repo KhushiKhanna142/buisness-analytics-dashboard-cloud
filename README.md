@@ -80,15 +80,16 @@ python3 app.py
 ### Access the Dashboard
 Open your browser and go to:
 http://<ec2-public-ip>:8050
----
 
 ## 📁 S3 Bucket Structure
+
+```
 analytics-dashboard-cc-project/
 ├── raw-data/
 │   └── sample.csv          # Uploaded input files
 └── reports/
-└── sample_results.json # Processed analysis output
----
+    └── sample_results.json # Processed analysis output
+```
 
 ## 📸 Screenshots
 
