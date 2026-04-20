@@ -24,9 +24,9 @@ A cloud-based data analytics dashboard built as part of a Cloud Computing course
 4. Results are saved back to the `reports/` folder in S3 as JSON
 5. Dashboard displays the analysis output and lists all saved reports
 
----
-
 ## 🗂️ Project Structure
+
+```
 analytics-dashboard-cloud/
 ├── app.py
 ├── analyze.py
@@ -35,8 +35,7 @@ analytics-dashboard-cloud/
 │   └── sample.csv
 ├── .gitignore
 └── README.md
----
-
+```
 ## 🛠️ Tech Stack
 
 - **Cloud**: AWS EC2 (Ubuntu 22.04), AWS S3
