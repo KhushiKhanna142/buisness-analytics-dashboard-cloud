@@ -1,262 +1,354 @@
-import boto3
-import json
-import dash
-from dash import html, dcc, Input, Output, State
+import boto3, json, dash, base64, traceback, platform, psutil
+from dash import html, dcc, Input, Output, State, ctx, dash_table
+import plotly.express as px
+import plotly.graph_objects as go
 import pandas as pd
 from io import StringIO
+from datetime import datetime
 
 BUCKET_NAME = 'analytics-dashboard-cc-project'
+try:
+    s3 = boto3.client('s3')
+    lam = boto3.client('lambda')
+    logs_client = boto3.client('logs')
+except Exception as e:
+    print(f"AWS init warning: {e}")
 
-app = dash.Dash(__name__)
+activity_log = []
+def log_event(msg):
+    activity_log.insert(0, {"time": datetime.now().strftime("%H:%M:%S"), "msg": msg})
+    if len(activity_log) > 30: activity_log.pop()
 
-app.index_string = '''
-<!DOCTYPE html>
-<html>
-<head>
-    {%metas%}
-    <title>Data Analytics Dashboard</title>
-    {%favicon%}
-    {%css%}
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #f0f2f5;
-            color: #1a1a2e;
-        }
-        .header {
-            background: linear-gradient(135deg, #1a1a2e, #16213e);
-            color: white;
-            padding: 24px 40px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-        }
-        .header h1 { font-size: 24px; font-weight: 600; letter-spacing: 0.5px; }
-        .header p { font-size: 13px; color: #a0aec0; margin-top: 4px; }
-        .container { max-width: 1000px; margin: 32px auto; padding: 0 24px; }
-        .card {
-            background: white;
-            border-radius: 12px;
-            padding: 24px;
-            margin-bottom: 24px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-        }
-        .card h3 {
-            font-size: 15px;
-            font-weight: 600;
-            color: #2d3748;
-            margin-bottom: 16px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #e2e8f0;
-        }
-        .upload-box {
-            border: 2px dashed #cbd5e0;
-            border-radius: 10px;
-            padding: 32px;
-            text-align: center;
-            cursor: pointer;
-            transition: all 0.2s;
-            background: #f7fafc;
-        }
-        .upload-box:hover { border-color: #4299e1; background: #ebf8ff; }
-        .upload-icon { font-size: 32px; margin-bottom: 8px; }
-        .upload-text { font-size: 14px; color: #718096; }
-        .input-row { display: flex; gap: 12px; align-items: center; }
-        .text-input {
-            flex: 1;
-            padding: 10px 14px;
-            border: 1px solid #e2e8f0;
-            border-radius: 8px;
-            font-size: 14px;
-            outline: none;
-            transition: border 0.2s;
-        }
-        .text-input:focus { border-color: #4299e1; }
-        .btn {
-            padding: 10px 24px;
-            border: none;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .btn-primary { background: #4299e1; color: white; }
-        .btn-primary:hover { background: #3182ce; }
-        .btn-secondary { background: #edf2f7; color: #4a5568; }
-        .btn-secondary:hover { background: #e2e8f0; }
-        .status-success {
-            margin-top: 12px;
-            padding: 10px 14px;
-            background: #f0fff4;
-            border: 1px solid #9ae6b4;
-            border-radius: 8px;
-            color: #276749;
-            font-size: 13px;
-        }
-        .status-error {
-            margin-top: 12px;
-            padding: 10px 14px;
-            background: #fff5f5;
-            border: 1px solid #feb2b2;
-            border-radius: 8px;
-            color: #c53030;
-            font-size: 13px;
-        }
-        .result-box {
-            background: #1a1a2e;
-            color: #68d391;
-            padding: 20px;
-            border-radius: 10px;
-            font-family: monospace;
-            font-size: 13px;
-            line-height: 1.6;
-            white-space: pre-wrap;
-            margin-top: 12px;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-        .report-item {
-            display: flex;
-            align-items: center;
-            padding: 10px 14px;
-            background: #f7fafc;
-            border-radius: 8px;
-            margin-bottom: 8px;
-            font-size: 13px;
-            color: #4a5568;
-            border: 1px solid #e2e8f0;
-        }
-        .report-icon { margin-right: 10px; font-size: 16px; }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-        .stat-card {
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            text-align: center;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-            border-top: 3px solid #4299e1;
-        }
-        .stat-value { font-size: 28px; font-weight: 700; color: #2d3748; }
-        .stat-label { font-size: 12px; color: #718096; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-    </style>
-</head>
-<body>
-    {%app_entry%}
-    <footer>{%config%}{%scripts%}{%renderer%}</footer>
-</body>
-</html>
-'''
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
+app.title = "Cloud Analytics Pro | AWS Serverless Dashboard"
+
+# System info
+sys_info = {
+    "os": platform.system() + " " + platform.release(),
+    "python": platform.python_version(),
+    "cpu_cores": psutil.cpu_count(),
+}
 
 app.layout = html.Div([
-    html.Div([
-        html.H1("Data Analytics Dashboard"),
-        html.P("S3 + EC2 Cloud Computing Project")
-    ], className="header"),
-
+    # HEADER
     html.Div([
         html.Div([
-            html.Div("📊", className="stat-value"),
-            html.Div("S3 Storage", className="stat-label")
-        ], className="stat-card"),
+            html.Div("⚡", className="logo-icon"),
+            html.Div([html.H1("Cloud Analytics Pro"), html.P("Serverless Data Intelligence Platform")], className="logo-text")
+        ], className="logo-area"),
         html.Div([
-            html.Div("⚙️", className="stat-value"),
-            html.Div("EC2 Compute", className="stat-label")
-        ], className="stat-card"),
-        html.Div([
-            html.Div("✅", className="stat-value"),
-            html.Div("Pipeline Active", className="stat-label")
-        ], className="stat-card"),
-    ], className="stats-grid", style={"marginTop": "32px", "padding": "0 24px", "maxWidth": "1000px", "margin": "32px auto 0"}),
+            html.Span("● PIPELINE ACTIVE", className="badge badge-live"),
+            html.Span(id="live-clock", className="badge"),
+            html.Span("ap-south-1", className="badge"),
+            html.Span("AWS Lambda + S3", className="badge"),
+        ], className="header-badges")
+    ], className="top-header"),
 
+    # SYSTEM STATUS BAR
     html.Div([
         html.Div([
-            html.H3("Upload CSV File to S3"),
-            dcc.Upload(
-                id='upload-data',
-                children=html.Div([
-                    html.Div("☁️", className="upload-icon"),
-                    html.Div("Drag and drop or click to upload a CSV file", className="upload-text")
-                ]),
-                className="upload-box",
-                multiple=False
-            ),
-            html.Div(id='upload-status')
-        ], className="card"),
+            html.Span("SYS", className="sys-label"),
+            html.Span(f"OS: {sys_info['os']}", className="sys-item"),
+            html.Span(f"Python: {sys_info['python']}", className="sys-item"),
+            html.Span(f"Cores: {sys_info['cpu_cores']}", className="sys-item"),
+            html.Span(id="cpu-usage", className="sys-item"),
+            html.Span(id="mem-usage", className="sys-item"),
+            html.Span(f"Bucket: {BUCKET_NAME}", className="sys-item sys-highlight"),
+        ]),
+    ], className="sys-bar"),
 
+    # TABS
+    html.Div([
+        dcc.Tabs(id='main-tabs', value='tab-pipeline', children=[
+            dcc.Tab(label='🚀 Pipeline', value='tab-pipeline', className='tab-item', selected_className='tab-active'),
+            dcc.Tab(label='🗂️ S3 Explorer', value='tab-explorer', className='tab-item', selected_className='tab-active'),
+            dcc.Tab(label='📋 Data Preview', value='tab-preview', className='tab-item', selected_className='tab-active'),
+            dcc.Tab(label='⏱️ Lambda Metrics', value='tab-metrics', className='tab-item', selected_className='tab-active'),
+            dcc.Tab(label='📝 Activity Log', value='tab-log', className='tab-item', selected_className='tab-active'),
+        ], className="tabs-container"),
+        html.Div(id='tab-content')
+    ], className="main-container"),
+
+    # FOOTER TERMINAL
+    html.Div([
         html.Div([
-            html.H3("Run Analysis"),
-            html.Div([
-                dcc.Input(
-                    id='filename-input',
-                    placeholder='Enter filename e.g. sample.csv',
-                    type='text',
-                    className="text-input"
-                ),
-                html.Button('Analyze', id='analyze-button', n_clicks=0, className="btn btn-primary"),
-            ], className="input-row"),
-            html.Div(id='analysis-output')
-        ], className="card"),
-
+            html.Span("▸ ", style={"color": "#10b981"}),
+            html.Span("cloud-analytics@aws", style={"color": "#6366f1"}),
+            html.Span(":~$ ", style={"color": "#94a3b8"}),
+            html.Span("System initialized. Connected to S3 and Lambda.", className="term-line", **{"data-text": "System initialized. Connected to S3 and Lambda."}),
+        ], className="terminal-line"),
         html.Div([
-            html.H3("Reports Saved to S3"),
-            html.Button('Refresh Reports', id='refresh-button', n_clicks=0, className="btn btn-secondary"),
-            html.Div(id='reports-list', style={"marginTop": "16px"})
-        ], className="card"),
+            html.Span("▸ ", style={"color": "#10b981"}),
+            html.Span("cloud-analytics@aws", style={"color": "#6366f1"}),
+            html.Span(":~$ ", style={"color": "#94a3b8"}),
+            html.Span(f"Region: ap-south-1 | Bucket: {BUCKET_NAME} | Runtime: Python {sys_info['python']}", className="term-line",
+                       **{"data-text": f"Region: ap-south-1 | Bucket: {BUCKET_NAME} | Runtime: Python {sys_info['python']}"}),
+        ], className="terminal-line"),
+        html.Div([
+            html.Span("▸ ", style={"color": "#10b981"}),
+            html.Span("cloud-analytics@aws", style={"color": "#6366f1"}),
+            html.Span(":~$ ", style={"color": "#94a3b8"}),
+            html.Span("Awaiting commands...", className="term-line term-blink", **{"data-text": "Awaiting commands..."}),
+        ], className="terminal-line"),
+    ], className="footer-terminal"),
 
-    ], className="container")
+    dcc.Interval(id='sys-refresh', interval=3000, n_intervals=0),
 ])
 
-@app.callback(
-    Output('upload-status', 'children'),
-    Input('upload-data', 'contents'),
-    State('upload-data', 'filename')
-)
-def upload_to_s3(contents, filename):
-    if contents is None:
-        return ''
-    import base64
-    content_type, content_string = contents.split(',')
-    decoded = base64.b64decode(content_string)
-    s3 = boto3.client('s3')
-    s3.put_object(Bucket=BUCKET_NAME, Key=f'raw-data/{filename}', Body=decoded)
-    return html.Div(f'✅ {filename} uploaded to S3 successfully.', className="status-success")
-
-@app.callback(
-    Output('analysis-output', 'children'),
-    Input('analyze-button', 'n_clicks'),
-    State('filename-input', 'value')
-)
-def run_analysis(n_clicks, filename):
-    if n_clicks == 0 or not filename:
-        return ''
-    try:
-        from analyze import run_pipeline
-        summary = run_pipeline(filename)
-        return html.Div(json.dumps(summary, indent=2), className="result-box")
-    except Exception as e:
-        return html.Div(f'Error: {str(e)}', className="status-error")
-
-@app.callback(
-    Output('reports-list', 'children'),
-    Input('refresh-button', 'n_clicks')
-)
-def list_reports(n_clicks):
-    s3 = boto3.client('s3')
-    response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix='reports/')
-    if 'Contents' not in response:
-        return html.Div('No reports yet. Run an analysis first.', style={"color": "#718096", "fontSize": "14px"})
-    files = [obj['Key'].replace('reports/', '') for obj in response['Contents']]
+def pipeline_tab():
     return html.Div([
         html.Div([
-            html.Span("📄", className="report-icon"),
-            html.Span(f)
-        ], className="report-item") for f in files
+            html.Div([html.Div("📤", className="arch-icon"), html.Div("Data Ingestion", className="arch-label"), html.Div("Amazon S3", className="arch-svc")], className="arch-step"),
+            html.Div([html.Div("⚡", className="arch-icon"), html.Div("Serverless Compute", className="arch-label"), html.Div("AWS Lambda", className="arch-svc")], className="arch-step"),
+            html.Div([html.Div("📊", className="arch-icon"), html.Div("Visualization", className="arch-label"), html.Div("Plotly + Dash", className="arch-svc")], className="arch-step"),
+        ], className="arch-banner"),
+        html.Div([
+            html.Div([
+                html.Div([
+                    html.Div([html.Div("📤", className="card-header-icon icon-ingest"), html.Div([html.Div("Ingestion Layer", className="card-title"), html.Div("Upload CSV → Amazon S3", className="card-subtitle")])], className="card-header"),
+                    dcc.Upload(id='upload-data', children=html.Div([html.Div("☁️", className="drop-icon"), html.Div("Drop CSV file here", className="drop-text"), html.Div("or click to browse", className="drop-hint")]), className="drop-zone", multiple=False),
+                    dcc.Loading(html.Div(id='upload-status'), type="dot", color="#6366f1")
+                ], className="glass-card"),
+                html.Div([
+                    html.Div([html.Div("⚡", className="card-header-icon icon-compute"), html.Div([html.Div("Compute Layer", className="card-title"), html.Div("Process with Lambda", className="card-subtitle")])], className="card-header"),
+                    dcc.Input(id='filename-input', placeholder='filename (e.g. sample.csv)', type='text', className="field-input"),
+                    html.Div([dcc.Checklist(id='compute-mode', options=[{'label': ' AWS Lambda (Serverless)', 'value': 'lambda'}], value=['lambda'], inline=True)], className="mode-toggle"),
+                    html.Button('🚀 Trigger Processing', id='analyze-button', n_clicks=0, className="btn-launch"),
+                    dcc.Loading(html.Div(id='analysis-output'), type="dot", color="#6366f1")
+                ], className="glass-card"),
+                html.Div([
+                    html.Div([html.Div("🗄️", className="card-header-icon icon-storage"), html.Div([html.Div("Storage Layer", className="card-title"), html.Div("S3 Report Artifacts", className="card-subtitle")])], className="card-header"),
+                    html.Button('🔄 Refresh Reports', id='refresh-button', n_clicks=0, className="btn-refresh"),
+                    dcc.Loading(html.Div(id='reports-list'), type="dot", color="#f59e0b")
+                ], className="glass-card"),
+            ]),
+            html.Div([
+                html.Div([
+                    html.Div([html.Div("📊", className="card-header-icon icon-dash"), html.Div([html.Div("Analytics Dashboard", className="card-title"), html.Div("Real-time data visualizations", className="card-subtitle")])], className="card-header"),
+                    html.Div(id="dashboard-content", children=[html.Div([html.Div("📡", className="empty-icon"), html.Div("Awaiting Data", className="empty-title"), html.Div("Upload → Process → View Report", className="empty-desc")], className="empty-state")])
+                ], className="glass-card dash-panel")
+            ])
+        ], className="pipeline-grid")
     ])
+
+def explorer_tab():
+    return html.Div([
+        html.Div([
+            html.Div([html.Div("🗂️", className="card-header-icon icon-storage"), html.Div([html.Div("S3 Bucket Explorer", className="card-title"), html.Div(f"s3://{BUCKET_NAME}", className="card-subtitle")])], className="card-header"),
+            html.Button('🔍 Scan Bucket', id='scan-bucket', n_clicks=0, className="btn-launch"),
+            html.Div(id='bucket-contents', style={"marginTop": "20px"})
+        ], className="glass-card")
+    ])
+
+def preview_tab():
+    return html.Div([
+        html.Div([
+            html.Div([html.Div("📋", className="card-header-icon icon-ingest"), html.Div([html.Div("Data Preview & Quality", className="card-title"), html.Div("Inspect raw CSV from S3", className="card-subtitle")])], className="card-header"),
+            html.Div([
+                dcc.Input(id='preview-filename', placeholder='filename (e.g. sample.csv)', type='text', className="field-input", style={"marginBottom": "0"}),
+                html.Button('👁️ Preview', id='preview-btn', n_clicks=0, className="btn-launch"),
+            ], style={"display": "grid", "gridTemplateColumns": "1fr auto", "gap": "12px", "alignItems": "center"}),
+            html.Div(id='preview-output', style={"marginTop": "20px"})
+        ], className="glass-card")
+    ])
+
+def metrics_tab():
+    return html.Div([
+        html.Div([
+            html.Div([html.Div("⏱️", className="card-header-icon icon-compute"), html.Div([html.Div("Lambda Performance & CloudWatch Logs", className="card-title"), html.Div("BusinessAnalyticsProcessor", className="card-subtitle")])], className="card-header"),
+            html.Button('📊 Fetch CloudWatch Logs', id='fetch-metrics', n_clicks=0, className="btn-launch"),
+            html.Div(id='metrics-output', style={"marginTop": "20px"})
+        ], className="glass-card")
+    ])
+
+def log_tab():
+    return html.Div([
+        html.Div([
+            html.Div([html.Div("📝", className="card-header-icon icon-dash"), html.Div([html.Div("Pipeline Activity Log", className="card-title"), html.Div("Real-time event tracking (auto-refresh)", className="card-subtitle")])], className="card-header"),
+            html.Div(id='activity-log')
+        ], className="glass-card")
+    ])
+
+# ===== CALLBACKS =====
+@app.callback(Output('tab-content', 'children'), Input('main-tabs', 'value'))
+def render_tab(tab):
+    return {'tab-pipeline': pipeline_tab, 'tab-explorer': explorer_tab, 'tab-preview': preview_tab, 'tab-metrics': metrics_tab, 'tab-log': log_tab}.get(tab, pipeline_tab)()
+
+@app.callback(Output('cpu-usage', 'children'), Output('mem-usage', 'children'), Input('sys-refresh', 'n_intervals'))
+def update_sys(_):
+    return f"CPU: {psutil.cpu_percent()}%", f"RAM: {psutil.virtual_memory().percent}%"
+
+@app.callback(Output('upload-status', 'children'), Output('filename-input', 'value'), Input('upload-data', 'contents'), State('upload-data', 'filename'))
+def upload_to_s3(contents, filename):
+    if not contents: return dash.no_update, dash.no_update
+    try:
+        _, cs = contents.split(',')
+        s3.put_object(Bucket=BUCKET_NAME, Key=f'raw-data/{filename}', Body=base64.b64decode(cs))
+        log_event(f"📤 Uploaded {filename} → s3://{BUCKET_NAME}/raw-data/")
+        return html.Div(f'✅ {filename} uploaded to S3', className="status-msg msg-success"), filename
+    except Exception as e:
+        log_event(f"❌ Upload failed: {e}")
+        return html.Div(f'❌ {e}', className="status-msg msg-error"), dash.no_update
+
+@app.callback(Output('analysis-output', 'children'), Input('analyze-button', 'n_clicks'), State('filename-input', 'value'), State('compute-mode', 'value'))
+def run_analysis(n, filename, mode):
+    if n == 0 or not filename: return dash.no_update
+    use_lambda = 'lambda' in mode
+    try:
+        if use_lambda:
+            log_event(f"⚡ Invoking Lambda for {filename}...")
+            resp = lam.invoke(FunctionName='BusinessAnalyticsProcessor', InvocationType='RequestResponse', Payload=json.dumps({"bucket": BUCKET_NAME, "key": f"raw-data/{filename}"}))
+            result = json.loads(resp['Payload'].read().decode('utf-8'))
+            if result.get('statusCode') == 200:
+                body = json.loads(result['body'])
+                log_event(f"✅ Lambda complete → {body['result_key']}")
+                return html.Div(f"✅ Lambda → {body['result_key']}", className="status-msg msg-success")
+            return html.Div(f"❌ {result}", className="status-msg msg-error")
+        else:
+            log_event(f"💻 Local processing {filename}...")
+            from analyze import run_pipeline
+            result = run_pipeline(filename)
+            if result['statusCode'] == 200:
+                body = json.loads(result['body'])
+                log_event(f"✅ Local done → {body['result_key']}")
+                return html.Div(f"✅ {body['result_key']}", className="status-msg msg-success")
+            return html.Div(f"❌ {result['body']}", className="status-msg msg-error")
+    except Exception as e:
+        log_event(f"❌ {e}")
+        return html.Div(f'❌ {e}', className="status-msg msg-error")
+
+@app.callback(Output('reports-list', 'children'), Input('refresh-button', 'n_clicks'), Input('analysis-output', 'children'))
+def list_reports(n, _):
+    try:
+        resp = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix='reports/')
+        if 'Contents' not in resp: return html.Div('No reports.', style={"color": "#64748b"})
+        files = [o['Key'] for o in resp['Contents'] if o['Key'].endswith('.json')]
+        return html.Div([html.Div([html.Span("📄"), html.Span(f.replace('reports/','')), html.Button("View", id={'type':'view-report','index':f}, className="view-btn")], className="report-row") for f in files])
+    except Exception as e:
+        return html.Div(f"Error: {e}", className="status-msg msg-error")
+
+@app.callback(Output('dashboard-content', 'children'), Input({'type': 'view-report', 'index': dash.dependencies.ALL}, 'n_clicks'), prevent_initial_call=True)
+def update_dashboard(n_clicks):
+    if not any(n_clicks): return dash.no_update
+    cid = ctx.triggered_id
+    if not cid: return dash.no_update
+    rk = cid['index']
+    log_event(f"📊 Rendering dashboard for {rk}")
+    try:
+        data = json.loads(s3.get_object(Bucket=BUCKET_NAME, Key=rk)['Body'].read().decode('utf-8'))
+        pbg = 'rgba(0,0,0,0)'
+        kpis = html.Div([
+            html.Div([html.Div(str(data.get('total_rows',0)), className="kpi-number"), html.Div("Rows", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(str(data.get('total_columns',0)), className="kpi-number"), html.Div("Features", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(str(len(data.get('numeric_columns',[]))), className="kpi-number"), html.Div("Numeric", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(str(len(data.get('categorical_columns',[]))), className="kpi-number"), html.Div("Categorical", className="kpi-name")], className="kpi-tile"),
+        ], className="kpi-row")
+        charts = []
+        for col, counts in list(data.get('categorical_summary',{}).items())[:2]:
+            fig = px.pie(names=list(counts.keys()), values=list(counts.values()), title=f"{col}", template="plotly_dark", color_discrete_sequence=px.colors.sequential.Plasma_r, hole=0.4)
+            fig.update_layout(paper_bgcolor=pbg, plot_bgcolor=pbg, margin=dict(t=40,b=20,l=20,r=20), font=dict(family="Inter"))
+            charts.append(html.Div(dcc.Graph(figure=fig, config={'displayModeBar': False}), className="chart-wrapper"))
+        ns = data.get('numeric_summary',{})
+        if ns:
+            means = {c: round(s.get('mean',0),2) for c,s in ns.items()}
+            fig2 = px.bar(x=list(means.keys()), y=list(means.values()), title="Feature Averages", template="plotly_dark")
+            fig2.update_traces(marker=dict(color=list(means.values()), colorscale='Viridis'))
+            fig2.update_layout(paper_bgcolor=pbg, plot_bgcolor=pbg, font=dict(family="Inter"))
+            charts.append(html.Div(dcc.Graph(figure=fig2, config={'displayModeBar': False}), className="chart-wrapper"))
+            stds = {c: round(s.get('std',0),2) for c,s in ns.items()}
+            fig_s = px.bar(x=list(stds.keys()), y=list(stds.values()), title="Std Deviation", template="plotly_dark")
+            fig_s.update_traces(marker_color='#f59e0b')
+            fig_s.update_layout(paper_bgcolor=pbg, plot_bgcolor=pbg, font=dict(family="Inter"))
+            charts.append(html.Div(dcc.Graph(figure=fig_s, config={'displayModeBar': False}), className="chart-wrapper"))
+        corr = data.get('correlation',{})
+        if corr:
+            cols = list(corr.keys())
+            z = [[corr[c][r] for r in cols] for c in cols]
+            fig3 = go.Figure(data=go.Heatmap(z=z, x=cols, y=cols, colorscale='Viridis', zmin=-1, zmax=1))
+            fig3.update_layout(title="Correlation Matrix", template="plotly_dark", paper_bgcolor=pbg, plot_bgcolor=pbg, font=dict(family="Inter"))
+            charts.append(html.Div(dcc.Graph(figure=fig3, config={'displayModeBar': False}), className="chart-wrapper"))
+        if ns and len(ns)>2:
+            cols_r = list(ns.keys())
+            fig_r = go.Figure()
+            fig_r.add_trace(go.Scatterpolar(r=[ns[c].get('min',0) for c in cols_r], theta=cols_r, fill='toself', name='Min', line_color='#06b6d4'))
+            fig_r.add_trace(go.Scatterpolar(r=[ns[c].get('max',0) for c in cols_r], theta=cols_r, fill='toself', name='Max', line_color='#f43f5e'))
+            fig_r.update_layout(title="Min/Max Radar", template="plotly_dark", paper_bgcolor=pbg, font=dict(family="Inter"), polar=dict(bgcolor='rgba(0,0,0,0)'))
+            charts.append(html.Div(dcc.Graph(figure=fig_r, config={'displayModeBar': False}), className="chart-wrapper"))
+        return html.Div([html.Div(f"📋 {rk.replace('reports/','')}", style={"fontSize":"15px","fontWeight":"600","marginBottom":"20px","color":"#818cf8","fontFamily":"JetBrains Mono"}), kpis, html.Div(charts, className="charts-grid")])
+    except Exception as e:
+        return html.Div(f"Error: {e}", className="status-msg msg-error")
+
+@app.callback(Output('bucket-contents', 'children'), Input('scan-bucket', 'n_clicks'), prevent_initial_call=True)
+def scan_bucket(n):
+    try:
+        log_event("🗂️ Scanning S3 bucket...")
+        resp = s3.list_objects_v2(Bucket=BUCKET_NAME)
+        if 'Contents' not in resp: return html.Div("Empty bucket.", style={"color":"#64748b"})
+        objects = resp['Contents']
+        total_size = sum(o['Size'] for o in objects)
+        rows = [{"Key": o['Key'], "Size": f"{round(o['Size']/1024,2)} KB", "Modified": o['LastModified'].strftime("%Y-%m-%d %H:%M"), "Class": o.get('StorageClass','STANDARD')} for o in objects]
+        stats = html.Div([
+            html.Div([html.Div(str(len(objects)), className="kpi-number"), html.Div("Objects", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(f"{round(total_size/1024,1)}", className="kpi-number"), html.Div("Total KB", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(str(len([o for o in objects if 'raw-data' in o['Key']])), className="kpi-number"), html.Div("Raw Files", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(str(len([o for o in objects if 'reports' in o['Key']])), className="kpi-number"), html.Div("Reports", className="kpi-name")], className="kpi-tile"),
+        ], className="kpi-row")
+        tbl = dash_table.DataTable(data=rows, columns=[{"name":c,"id":c} for c in ["Key","Size","Modified","Class"]],
+            style_header={'backgroundColor':'#1e293b','color':'#94a3b8','fontWeight':'600','border':'1px solid #334155','fontFamily':'Inter'},
+            style_cell={'backgroundColor':'#0f172a','color':'#f1f5f9','border':'1px solid #1e293b','fontSize':'12px','fontFamily':'JetBrains Mono','padding':'10px'},
+            style_data_conditional=[{'if':{'row_index':'odd'},'backgroundColor':'#0a0f1e'}], page_size=15)
+        return html.Div([stats, tbl])
+    except Exception as e:
+        return html.Div(f"Error: {e}", className="status-msg msg-error")
+
+@app.callback(Output('preview-output', 'children'), Input('preview-btn', 'n_clicks'), State('preview-filename', 'value'), prevent_initial_call=True)
+def preview_data(n, filename):
+    if not filename: return html.Div("Enter filename.", className="status-msg msg-error")
+    try:
+        log_event(f"👁️ Previewing {filename}")
+        df = pd.read_csv(StringIO(s3.get_object(Bucket=BUCKET_NAME, Key=f'raw-data/{filename}')['Body'].read().decode('utf-8')))
+        info = html.Div([
+            html.Div([html.Div(str(len(df)), className="kpi-number"), html.Div("Rows", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(str(len(df.columns)), className="kpi-number"), html.Div("Columns", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(str(df.isnull().sum().sum()), className="kpi-number"), html.Div("Null Values", className="kpi-name")], className="kpi-tile"),
+            html.Div([html.Div(str(len(df.dtypes.unique())), className="kpi-number"), html.Div("Data Types", className="kpi-name")], className="kpi-tile"),
+        ], className="kpi-row")
+        dtypes = html.Div([html.Span(f"{c}: {df[c].dtype}", className="badge", style={"margin":"3px"}) for c in df.columns], style={"marginBottom":"16px"})
+        tbl = dash_table.DataTable(data=df.head(50).to_dict('records'), columns=[{"name":c,"id":c} for c in df.columns],
+            style_header={'backgroundColor':'#1e293b','color':'#94a3b8','fontWeight':'600','border':'1px solid #334155','fontFamily':'Inter'},
+            style_cell={'backgroundColor':'#0f172a','color':'#f1f5f9','border':'1px solid #1e293b','fontSize':'12px','fontFamily':'JetBrains Mono','padding':'8px','maxWidth':'200px','overflow':'hidden','textOverflow':'ellipsis'},
+            style_data_conditional=[{'if':{'row_index':'odd'},'backgroundColor':'#0a0f1e'}], page_size=20, sort_action='native', filter_action='native')
+        return html.Div([info, dtypes, tbl])
+    except Exception as e:
+        return html.Div(f"Error: {e}", className="status-msg msg-error")
+
+@app.callback(Output('metrics-output', 'children'), Input('fetch-metrics', 'n_clicks'), prevent_initial_call=True)
+def fetch_metrics(n):
+    try:
+        log_event("⏱️ Fetching CloudWatch logs...")
+        lg = '/aws/lambda/BusinessAnalyticsProcessor'
+        streams = logs_client.describe_log_streams(logGroupName=lg, orderBy='LastEventTime', descending=True, limit=5).get('logStreams',[])
+        if not streams: return html.Div("No logs found. Run Lambda first.", style={"color":"#64748b"})
+        entries = []
+        for st in streams[:3]:
+            for ev in logs_client.get_log_events(logGroupName=lg, logStreamName=st['logStreamName'], limit=15).get('events',[]):
+                msg = ev['message'].strip()
+                if msg:
+                    ts = datetime.fromtimestamp(ev['timestamp']/1000).strftime("%H:%M:%S")
+                    entries.append({"Time": ts, "Log": msg[:300]})
+        if not entries: entries = [{"Time":"-","Log":"No entries."}]
+        tbl = dash_table.DataTable(data=entries[:25], columns=[{"name":"Time","id":"Time"},{"name":"Log","id":"Log"}],
+            style_header={'backgroundColor':'#1e293b','color':'#94a3b8','fontWeight':'600','border':'1px solid #334155','fontFamily':'Inter'},
+            style_cell={'backgroundColor':'#0f172a','color':'#f1f5f9','border':'1px solid #1e293b','fontSize':'11px','fontFamily':'JetBrains Mono','padding':'8px','whiteSpace':'normal'},
+            style_cell_conditional=[{'if':{'column_id':'Time'},'width':'80px','color':'#6366f1'}])
+        return tbl
+    except Exception as e:
+        return html.Div(f"CloudWatch error: {e}", className="status-msg msg-error")
+
+@app.callback(Output('activity-log', 'children'), Input('sys-refresh', 'n_intervals'))
+def update_log(_):
+    if not activity_log: return html.Div("No activity yet.", style={"color":"#64748b","padding":"20px"})
+    return html.Div([html.Div([html.Span(e['time'], style={"color":"#6366f1","fontFamily":"JetBrains Mono","fontSize":"12px","minWidth":"70px"}), html.Span(e['msg'], style={"fontSize":"13px"})], className="report-row") for e in activity_log])
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8050, debug=False)
